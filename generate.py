@@ -1,33 +1,37 @@
 # =============================================================================
-#  generate.py — ЦИКЛ ДЛЯ ОДНОЙ КАРТИНКИ + ПОВТОРЫ ПРИ ОШИБКЕ (Этап 6, v2)
+#  generate.py — ПОЛНЫЙ БАТЧ-ЦИКЛ ПО ВСЕЙ ПАПКЕ INPUT (Этап 7)
 #
-#  НАДЁЖНАЯ ЛОГИКА (после живой диагностики):
+#  ЧТО ДЕЛАЕТ:
+#    - Берёт картинки из INPUT по очереди.
+#    - Для каждой: цикл попыток до MAX_ATTEMPTS (логика как на Этапе 6).
+#        успех            -> видео в OUTPUT, картинка в DONE;
+#        все попытки мимо  -> картинка в FAILED.
+#    - Между РАЗНЫМИ картинками — случайная пауза (BATCH_DELAY_MIN/MAX_SEC).
+#    - Браузер открывается ОДИН раз на весь батч (быстрее, сессия не теряется).
+#    - Весь прогресс пишется И в консоль, И в лог-файл (logs/), см. logger.py.
+#    - Цикл сам завершается, когда в INPUT не осталось картинок.
+#
+#  НАДЁЖНАЯ ЛОГИКА ОДНОЙ ГЕНЕРАЦИИ (после живой диагностики, Этап 6):
 #    - Главный сигнал состояния — кнопка "Сгенерировать":
-#        disabled = фото не готово ИЛИ генерация идёт;
-#        enabled  = сайт готов принять генерацию.
+#        disabled = фото не готово ИЛИ генерация идёт;  enabled = сайт готов.
 #    - После загрузки картинки ЖДЁМ, пока кнопка станет активной (≈5 сек).
-#      Не стала за WAIT_FOR_BUTTON_ENABLED_MS -> картинка не загрузилась
-#      (глюк сайта) -> ошибка попытки -> перезаход с нуля.
 #    - Клик "Сгенерировать" сам ждёт активации, поэтому ФАКТ клика = старт.
-#      Подсказку "заявка в работе" больше НЕ ждём как условие (она ненадёжна).
 #    - Окончание генерации ловим по тому, что кнопка СНОВА стала enabled.
-#    - Кнопка "Скачать" появилась -> успех (видео в OUTPUT, картинка в DONE);
-#      не появилась -> ошибка -> повтор (до MAX_ATTEMPTS), иначе в FAILED.
-#
-#  Пока обрабатываем ОДНУ картинку (первую из INPUT). Полный батч — Этап 7.
+#    - Кнопка "Скачать" появилась -> успех; не появилась -> ошибка -> повтор.
 # =============================================================================
 
 import os                                         # работа с путями и файлами
 import time                                       # замер времени генерации
-import random                                     # случайная задержка перед повтором
+import random                                     # случайные задержки
 from playwright.sync_api import sync_playwright   # движок браузера
 
 import config                              # все наши настройки и селекторы
 from orientation import get_orientation    # определение 16:9 / 9:16 по картинке
+from logger import log                     # печать в консоль + запись в лог-файл
 
 
 # -----------------------------------------------------------------------------
-#  ПОМОЩНИК: кортеж-селектор из config -> локатор Playwright. (без изменений)
+#  ПОМОЩНИК: кортеж-селектор из config -> локатор Playwright.
 # -----------------------------------------------------------------------------
 def loc(page, name):
     """Берёт селектор по имени из config.SELECTORS и возвращает локатор Playwright."""
@@ -50,23 +54,23 @@ def loc(page, name):
 
 
 # -----------------------------------------------------------------------------
-#  ПОМОЩНИК: открыть страницу с НЕСКОЛЬКИМИ ПОПЫТКАМИ. (без изменений)
+#  ПОМОЩНИК: открыть страницу с НЕСКОЛЬКИМИ ПОПЫТКАМИ.
 # -----------------------------------------------------------------------------
 def open_page_with_retry(page, url):
     """Пытается открыть url до config.PAGE_OPEN_ATTEMPTS раз. Возвращает True при успехе."""
     attempts = config.PAGE_OPEN_ATTEMPTS
     for attempt in range(1, attempts + 1):
         try:
-            print(f"Открываю {url} (попытка {attempt} из {attempts})...")
+            log(f"Открываю {url} (попытка {attempt} из {attempts})...")
             page.goto(url)
-            print("✅ Страница открылась.")
+            log("✅ Страница открылась.")
             return True
         except Exception as e:
-            print(f"⚠️ Не удалось открыть с попытки {attempt}: {e}")
+            log(f"⚠️ Не удалось открыть с попытки {attempt}: {e}")
             if attempt < attempts:
-                print(f"Жду {config.PAGE_OPEN_RETRY_SEC} сек и пробую снова...")
+                log(f"Жду {config.PAGE_OPEN_RETRY_SEC} сек и пробую снова...")
                 time.sleep(config.PAGE_OPEN_RETRY_SEC)
-    print(f"❌ Страница так и не открылась за {attempts} попыток.")
+    log(f"❌ Страница так и не открылась за {attempts} попыток.")
     return False
 
 
@@ -80,41 +84,38 @@ def process_one_image(page, image_path, image_name):
     # Заранее определяем ориентацию (16:9 или 9:16) по размерам картинки.
     orientation = get_orientation(image_path)        # "16_9" или "9_16"
     ratio_selector_name = f"ratio_{orientation}"     # имя селектора в config
-    print(f"Ориентация: {orientation} -> кнопка '{ratio_selector_name}'")
+    log(f"Ориентация: {orientation} -> кнопка '{ratio_selector_name}'")
 
     # --- Шаг 1: открываем дашборд (с повтором, сайт бывает медленным) ---
     if not open_page_with_retry(page, config.DASHBOARD_URL):
-        print("⚠️ Дашборд не открылся — считаю эту попытку ошибкой.")
+        log("⚠️ Дашборд не открылся — считаю эту попытку ошибкой.")
         return "error"
 
     # --- Шаг 2: карточка "Генерация видео" ---
-    print("Открываю карточку 'Генерация видео'...")
+    log("Открываю карточку 'Генерация видео'...")
     loc(page, "video_card").click()
 
     # --- Шаг 3: режим "Из фото в видео" ---
-    print("Переключаюсь в режим 'Из фото в видео'...")
+    log("Переключаюсь в режим 'Из фото в видео'...")
     loc(page, "mode_photo_to_video").click()
 
     # --- Шаг 4: загружаем картинку ---
-    print(f"Загружаю картинку: {image_name}")
+    log(f"Загружаю картинку: {image_name}")
     loc(page, "image_upload").set_input_files(image_path)
 
     # --- Шаг 5: вписываем промпт ---
-    print(f"Ввожу промпт: '{config.PROMPT_TEXT}'")
+    log(f"Ввожу промпт: '{config.PROMPT_TEXT}'")
     loc(page, "prompt_field").fill(config.PROMPT_TEXT)
 
     # --- Шаг 6: выбираем соотношение сторон ---
-    print(f"Жму кнопку соотношения: {ratio_selector_name}")
+    log(f"Жму кнопку соотношения: {ratio_selector_name}")
     loc(page, ratio_selector_name).click()
 
     # --- Шаг 7: ЖДЁМ, пока кнопка "Сгенерировать" станет АКТИВНОЙ ---
     # Это и есть подтверждение, что картинка реально загрузилась (≈5 сек).
-    # Если кнопка НЕ активировалась за отведённое время — картинка не
-    # загрузилась (известный глюк сайта) -> считаем попытку ошибкой.
     gen = loc(page, "generate_button")
-    print("Жду, пока кнопка 'Сгенерировать' станет активной (картинка грузится)...")
+    log("Жду, пока кнопка 'Сгенерировать' станет активной (картинка грузится)...")
     try:
-        # Ждём именно состояния "enabled" у кнопки.
         gen.wait_for(state="visible", timeout=config.WAIT_FOR_BUTTON_ENABLED_MS)
         # wait_for(visible) не проверяет enabled, поэтому опрашиваем enabled сами.
         deadline = time.time() + config.WAIT_FOR_BUTTON_ENABLED_MS / 1000
@@ -123,23 +124,23 @@ def process_one_image(page, image_path, image_name):
                 break
             time.sleep(0.5)
         if not gen.is_enabled():
-            print("❌ Кнопка 'Сгенерировать' не стала активной — картинка не загрузилась.")
+            log("❌ Кнопка 'Сгенерировать' не стала активной — картинка не загрузилась.")
             return "error"
     except Exception:
-        print("❌ Не дождался активной кнопки 'Сгенерировать' — картинка не загрузилась.")
+        log("❌ Не дождался активной кнопки 'Сгенерировать' — картинка не загрузилась.")
         return "error"
-    print("✅ Кнопка активна — картинка загрузилась.")
+    log("✅ Кнопка активна — картинка загрузилась.")
 
     # --- Шаг 8: запускаем генерацию ---
     # Клик сам дождётся кликабельности; раз он прошёл — генерация СТАРТОВАЛА.
-    print("Нажимаю 'Сгенерировать'...")
+    log("Нажимаю 'Сгенерировать'...")
     gen.click()
-    print("✅ Генерация запущена.")
+    log("✅ Генерация запущена.")
 
     # Для информации (НЕ как условие) глянем подсказку "заявка в работе".
     try:
         if loc(page, "busy_indicator").is_visible():
-            print("ℹ️ Подсказка 'заявка в работе' видна (доп. подтверждение).")
+            log("ℹ️ Подсказка 'заявка в работе' видна (доп. подтверждение).")
     except Exception:
         pass
 
@@ -147,9 +148,8 @@ def process_one_image(page, image_path, image_name):
 
     # --- Шаг 9: ЖДЁМ ОКОНЧАНИЯ генерации по кнопке ---
     # Пока генерация идёт — кнопка "Сгенерировать" disabled.
-    # Когда сайт снова готов — кнопка опять становится enabled. Это и есть
-    # сигнал "генерация завершилась". Опрашиваем её раз в несколько секунд.
-    print("Жду окончания генерации (5-15 минут)...")
+    # Когда сайт снова готов — кнопка опять enabled. Опрашиваем раз в 5 сек.
+    log("Жду окончания генерации (5-15 минут)...")
     deadline = time.time() + config.WAIT_FOR_VIDEO_MS / 1000
     finished = False
     while time.time() < deadline:
@@ -163,13 +163,12 @@ def process_one_image(page, image_path, image_name):
         time.sleep(5)   # опрос раз в 5 секунд (не долбим страницу)
 
     if not finished:
-        # За максимальное время кнопка так и не разблокировалась — что-то зависло.
-        print("❌ Генерация не завершилась за отведённый максимум — считаю ошибкой.")
+        log("❌ Генерация не завершилась за отведённый максимум — считаю ошибкой.")
         return "error"
 
     elapsed = int(time.time() - start_time)
     minutes, seconds = divmod(elapsed, 60)
-    print(f"Генерация завершилась за {minutes} мин {seconds} сек. Проверяю результат...")
+    log(f"Генерация завершилась за {minutes} мин {seconds} сек. Проверяю результат...")
 
     # --- Шаг 10: ДЕТЕКТОР УСПЕХА/ОШИБКИ по кнопке "Скачать" ---
     download_link = loc(page, "download_button")
@@ -177,88 +176,149 @@ def process_one_image(page, image_path, image_name):
         download_link.wait_for(state="visible", timeout=config.WAIT_FOR_DOWNLOAD_MS)
     except Exception:
         # Кнопки "Скачать" нет — генерация не удалась (глюк сайта), можно повторить.
-        print("❌ Кнопка 'Скачать' не появилась — генерация завершилась ОШИБКОЙ.")
+        log("❌ Кнопка 'Скачать' не появилась — генерация завершилась ОШИБКОЙ.")
         try:
             body_text = page.locator("body").inner_text(timeout=5000)
             lines = [ln.strip() for ln in body_text.splitlines() if ln.strip()]
             tail = " | ".join(lines)[-300:]
-            print(f"ℹ️ Что видно на странице (хвост текста): ...{tail}")
+            log(f"ℹ️ Что видно на странице (хвост текста): ...{tail}")
         except Exception:
-            print("ℹ️ Текст страницы прочитать не удалось (не критично).")
+            log("ℹ️ Текст страницы прочитать не удалось (не критично).")
         return "error"
 
-    print("✅ Кнопка 'Скачать' на месте — генерация удалась.")
+    log("✅ Кнопка 'Скачать' на месте — генерация удалась.")
 
     # --- Шаг 11: СКАЧИВАЕМ ВИДЕО В OUTPUT ---
-    print("Скачиваю видео...")
+    log("Скачиваю видео...")
     with page.expect_download(timeout=config.PAGE_TIMEOUT_MS) as download_info:
         download_link.click()
     download = download_info.value
     suggested_name = download.suggested_filename   # имя как отдал сайт
     save_path = os.path.join(config.OUTPUT_DIR, suggested_name)
     download.save_as(save_path)
-    print(f"✅ Видео сохранено: {save_path}")
+    log(f"✅ Видео сохранено: {save_path}")
 
     return "success"
 
 
 # -----------------------------------------------------------------------------
-#  ГЛАВНАЯ ФУНКЦИЯ: одна картинка, попытки до MAX_ATTEMPTS. (логика как в v1)
+#  ОБРАБОТКА ОДНОЙ КАРТИНКИ С ПОВТОРАМИ + ПЕРЕНОС в DONE/FAILED.
+#  (Вынесено из старого main(), чтобы батч-цикл переиспользовал эту логику.)
+#  Возвращает "success" или "error" (по итогу всех попыток).
 # -----------------------------------------------------------------------------
-def main():
-    if not os.path.exists(config.STORAGE_STATE_FILE):
-        print(f"ОШИБКА: нет файла сессии '{config.STORAGE_STATE_FILE}'.")
-        print("Сначала запусти login.py и войди в аккаунт руками.")
-        return
+def handle_image_with_retries(page, image_path, image_name):
+    """Гоняет картинку до MAX_ATTEMPTS попыток и разносит её в DONE или FAILED."""
+    log(f"Попыток на эту картинку (MAX_ATTEMPTS): {config.MAX_ATTEMPTS}")
 
+    result = "error"
+    for attempt in range(1, config.MAX_ATTEMPTS + 1):
+        log(f"----- ПОПЫТКА {attempt} из {config.MAX_ATTEMPTS} для '{image_name}' -----")
+        try:
+            result = process_one_image(page, image_path, image_name)
+        except Exception as e:
+            log(f"⚠️ Попытка {attempt} прервалась сбоем: {e}")
+            result = "error"
+
+        if result == "success":
+            log(f"✅ Попытка {attempt} успешна.")
+            break
+        else:
+            if attempt < config.MAX_ATTEMPTS:
+                # Перед ПОВТОРОМ упавшей картинки — своя случайная пауза.
+                pause = random.randint(config.DELAY_MIN_SEC, config.DELAY_MAX_SEC)
+                log(f"↻ Попытка {attempt} неудачна. "
+                    f"Жду {pause} сек перед повтором (чтобы не выглядеть ботом)...")
+                time.sleep(pause)
+            else:
+                log(f"❌ Попытка {attempt} неудачна. Попытки исчерпаны.")
+
+    # Разносим картинку по итогу: успех -> DONE, провал -> FAILED.
+    if result == "success":
+        done_path = os.path.join(config.DONE_DIR, image_name)
+        os.replace(image_path, done_path)
+        log(f"🎉 УСПЕХ. Картинка перенесена в DONE: {done_path}")
+    else:
+        failed_path = os.path.join(config.FAILED_DIR, image_name)
+        os.replace(image_path, failed_path)
+        log(f"🛑 ВСЕ ПОПЫТКИ ПРОВАЛЕНЫ. Картинка перенесена в FAILED: {failed_path}")
+
+    return result
+
+
+# -----------------------------------------------------------------------------
+#  СПИСОК КАРТИНОК В INPUT (отсортированный, только поддерживаемые форматы).
+# -----------------------------------------------------------------------------
+def list_input_images():
+    """Возвращает отсортированный список имён картинок в INPUT."""
     valid_ext = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
     files = [f for f in os.listdir(config.INPUT_DIR) if f.lower().endswith(valid_ext)]
-    if not files:
-        print(f"ОШИБКА: в папке '{config.INPUT_DIR}' нет картинок.")
+    files.sort()   # стабильный порядок (по алфавиту), чтобы шли предсказуемо
+    return files
+
+
+# -----------------------------------------------------------------------------
+#  ГЛАВНАЯ ФУНКЦИЯ: ПОЛНЫЙ БАТЧ по всей папке INPUT.
+# -----------------------------------------------------------------------------
+def main():
+    # 1) Должна быть сохранённая сессия (логин делается отдельно через login.py).
+    if not os.path.exists(config.STORAGE_STATE_FILE):
+        log(f"ОШИБКА: нет файла сессии '{config.STORAGE_STATE_FILE}'.")
+        log("Сначала запусти login.py и войди в аккаунт руками.")
         return
 
-    image_name = files[0]
-    image_path = os.path.join(config.INPUT_DIR, image_name)
-    print(f"Картинка в работе: {image_path}")
-    print(f"Попыток на эту картинку (MAX_ATTEMPTS): {config.MAX_ATTEMPTS}")
+    # 2) Берём текущий список картинок. Если пусто — сразу выходим.
+    files = list_input_images()
+    if not files:
+        log(f"В папке '{config.INPUT_DIR}' нет картинок. Делать нечего — выхожу.")
+        return
 
+    total = len(files)
+    log("==================================================")
+    log(f"СТАРТ БАТЧА. Картинок в INPUT: {total}")
+    log("==================================================")
+
+    # 3) Браузер открываем ОДИН раз на весь батч.
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
         context = browser.new_context(storage_state=config.STORAGE_STATE_FILE)
         page = context.new_page()
         page.set_default_timeout(config.PAGE_TIMEOUT_MS)
 
-        result = "error"
-        for attempt in range(1, config.MAX_ATTEMPTS + 1):
-            print(f"\n===== ПОПЫТКА {attempt} из {config.MAX_ATTEMPTS} =====")
-            try:
-                result = process_one_image(page, image_path, image_name)
-            except Exception as e:
-                print(f"⚠️ Попытка {attempt} прервалась сбоем: {e}")
-                result = "error"
+        success_count = 0   # счётчик успешных
+        failed_count = 0    # счётчик проваленных
 
+        # 4) Идём по картинкам по очереди. index — номер для лога (1..total).
+        for index, image_name in enumerate(files, start=1):
+            image_path = os.path.join(config.INPUT_DIR, image_name)
+
+            log("")  # пустая строка-разделитель для читабельности лога
+            log(f"########## КАРТИНКА {index} из {total}: {image_name} ##########")
+
+            # Полная обработка одной картинки (с попытками и переносом).
+            result = handle_image_with_retries(page, image_path, image_name)
             if result == "success":
-                print(f"✅ Попытка {attempt} успешна.")
-                break
+                success_count += 1
             else:
-                if attempt < config.MAX_ATTEMPTS:
-                    # Перед повтором ждём СЛУЧАЙНУЮ паузу из диапазона config,
-                    # чтобы поведение не выглядело "роботным" и не нагружать сайт.
-                    pause = random.randint(config.DELAY_MIN_SEC, config.DELAY_MAX_SEC)
-                    print(f"↻ Попытка {attempt} неудачна. "
-                          f"Жду {pause} сек перед повтором (чтобы не выглядеть ботом)...")
-                    time.sleep(pause)
-                else:
-                    print(f"❌ Попытка {attempt} неудачна. Попытки исчерпаны.")
+                failed_count += 1
 
-        if result == "success":
-            done_path = os.path.join(config.DONE_DIR, image_name)
-            os.replace(image_path, done_path)
-            print(f"\n🎉 УСПЕХ. Картинка перенесена в DONE: {done_path}")
-        else:
-            failed_path = os.path.join(config.FAILED_DIR, image_name)
-            os.replace(image_path, failed_path)
-            print(f"\n🛑 ВСЕ ПОПЫТКИ ПРОВАЛЕНЫ. Картинка перенесена в FAILED: {failed_path}")
+            log(f"ПРОГРЕСС: обработано {index} из {total} "
+                f"(успешно: {success_count}, провалено: {failed_count}).")
+
+            # 5) ПАУЗА перед СЛЕДУЮЩЕЙ картинкой (только если она есть).
+            #    Между разными картинками — свой диапазон BATCH_DELAY_*.
+            if index < total:
+                pause = random.randint(config.BATCH_DELAY_MIN_SEC,
+                                       config.BATCH_DELAY_MAX_SEC)
+                log(f"⏸ Пауза {pause} сек перед следующей картинкой...")
+                time.sleep(pause)
+
+        # 6) Итоги батча.
+        log("")
+        log("==================================================")
+        log(f"БАТЧ ЗАВЕРШЁН. Всего: {total} | "
+            f"успешно: {success_count} | провалено: {failed_count}.")
+        log("Успешные -> DONE, проваленные -> FAILED.")
+        log("==================================================")
 
         browser.close()
 
