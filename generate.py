@@ -193,10 +193,26 @@ def process_one_image(page, image_path, image_name):
     with page.expect_download(timeout=config.PAGE_TIMEOUT_MS) as download_info:
         download_link.click()
     download = download_info.value
-    suggested_name = download.suggested_filename   # имя как отдал сайт
-    save_path = os.path.join(config.OUTPUT_DIR, suggested_name)
+
+    # Имя, которое предлагает сайт (нужно только чтобы ВЗЯТЬ из него расширение).
+    suggested_name = download.suggested_filename            # напр. "video_8f3a1.mp4"
+    _, video_ext = os.path.splitext(suggested_name)         # ".mp4" (с точкой)
+    if not video_ext:                                       # вдруг сайт не дал расширение
+        video_ext = ".mp4"                                 # подстрахуемся самым частым
+
+    # Берём имя ИСХОДНОЙ картинки без её расширения и клеим расширение видео.
+    image_base, _ = os.path.splitext(image_name)           # "cat" из "cat.jpg"
+    video_name = image_base + video_ext                    # "cat.mp4"
+
+    # Защита от перезаписи: если такой файл уже есть в OUTPUT — добавим _2, _3, ...
+    save_path = os.path.join(config.OUTPUT_DIR, video_name)
+    counter = 2
+    while os.path.exists(save_path):
+        save_path = os.path.join(config.OUTPUT_DIR, f"{image_base}_{counter}{video_ext}")
+        counter += 1
+
     download.save_as(save_path)
-    log(f"✅ Видео сохранено: {save_path}")
+    log(f"✅ Видео сохранено: {save_path}  (имя — как у картинки '{image_name}')")
 
     return "success"
 
