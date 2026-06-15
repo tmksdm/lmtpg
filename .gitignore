@@ -12,12 +12,14 @@ auth.json
 INPUT/*
 OUTPUT/*
 DONE/*
+FAILED/*
 logs/*
 
 # --- Но сами пустые папки сохраняем, чтобы структура была видна (см. ниже) ---
 !INPUT/.gitkeep
 !OUTPUT/.gitkeep
 !DONE/.gitkeep
+!FAILED/.gitkeep
 !logs/.gitkeep
 
 # --- Служебные файлы Python ---
